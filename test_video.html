@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Testing Platform</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .video-container {
+            margin: 20px 0;
+        }
+        video {
+            width: 100%;
+            border-radius: 8px;
+        }
+        .auth-section {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .error { color: #dc3545; }
+        .success { color: #198754; }
+        button {
+            padding: 8px 16px;
+            background: #0d6efd;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover { background: #0b5ed7; }
+        input {
+            padding: 8px;
+            margin-right: 8px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            width: 300px;
+        }
+        .loading { color: #666; }
+        .tab-container {
+            margin: 20px 0;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .tab-button {
+            padding: 10px 20px;
+            background: none;
+            border: none;
+            color: #666;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        .tab-button.active {
+            color: #0d6efd;
+            border-bottom: 2px solid #0d6efd;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .subject-card {
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .lesson-list {
+            margin-left: 20px;
+        }
+        .lesson-item {
+            padding: 15px;
+            border: 1px solid #dee2e6;
+            margin: 10px 0;
+            border-radius: 8px;
+            background: white;
+        }
+        .lesson-item:hover {
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .video-player {
+            position: relative;
+            width: 100%;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .video-player video {
+            width: 100%;
+            display: block;
+        }
+        .video-player .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+        }
+        .video-info {
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        .login-form {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+        .status-badge.active {
+            background: #198754;
+            color: white;
+        }
+        .status-badge.inactive {
+            background: #dc3545;
+            color: white;
+        }
+        .podcast-container {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+        }
+        .audio-player {
+            width: 100%;
+            margin: 10px 0;
+        }
+        .podcast-info {
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="auth-section">
+        <h2>Authentication</h2>
+        <div>
+            <input type="text" id="tokenInput" placeholder="Enter your authentication token">
+            <button onclick="setToken()">Set Token</button>
+        </div>
+        <div id="authStatus"></div>
+    </div>
+
+    <div class="tab-container">
+        <button class="tab-button active" onclick="switchTab('videos')">Videos</button>
+        <button class="tab-button" onclick="switchTab('subjects')">Subjects & Lessons</button>
+        <button class="tab-button" onclick="switchTab('podcasts')">Podcasts</button>
+    </div>
+
+    <div id="videos" class="tab-content active">
+        <div id="videoList"></div>
+    </div>
+
+    <div id="subjects" class="tab-content">
+        <div id="subjectList"></div>
+    </div>
+
+    <div id="podcasts" class="tab-content">
+        <div id="podcastList"></div>
+    </div>
+
+    <script>
+        let authToken = localStorage.getItem('authToken');
+
+        function setToken() {
+            const tokenInput = document.getElementById('tokenInput');
+            authToken = tokenInput.value.trim();
+            if (authToken) {
+                localStorage.setItem('authToken', authToken);
+                tokenInput.value = '';
+                updateAuthStatus(true);
+                fetchVideos();
+                fetchSubjects();
+                fetchPodcasts();
+            }
+        }
+
+        function updateAuthStatus(isAuthenticated) {
+            const authStatus = document.getElementById('authStatus');
+            if (isAuthenticated) {
+                authStatus.textContent = 'Authenticated';
+                authStatus.className = 'success';
+            } else {
+                authStatus.textContent = 'Please enter your authentication token';
+                authStatus.className = 'error';
+            }
+        }
+
+        async function loadVideo(type, id) {
+            try {
+                const endpoint = type === 'lesson' 
+                    ? `http://127.0.0.1:8000/api/lessons/${id}/stream`
+                    : `http://127.0.0.1:8000/api/videos/${id}/stream`;
+                    
+                const response = await fetch(endpoint, {
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`
+                    }
+                });
+                
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        handleAuthError();
+                        return null;
+                    }
+                    throw new Error('Failed to load video');
+                }
+                
+                const blob = await response.blob();
+                return URL.createObjectURL(blob);
+            } catch (error) {
+                console.error('Error loading video:', error);
+                return null;
+            }
+        }
+
+        async function fetchVideos() {
+            const videoList = document.getElementById('videoList');
+            if (!authToken) {
+                videoList.innerHTML = '<div class="error">Authentication required</div>';
+                return;
+            }
+
+            videoList.innerHTML = '<div class="loading">Loading videos...</div>';
+
+            try {
+                const response = await fetch('http://127.0.0.1:8000/api/videos', {
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`,
+                        'Accept': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        handleAuthError();
+                        return;
+                    }
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                
+                if (data.data && data.data.length > 0) {
+                    videoList.innerHTML = '';
+                    
+                    for (const video of data.data) {
+                        const videoContainer = document.createElement('div');
+                        videoContainer.className = 'video-container';
+                        videoContainer.innerHTML = `
+                            <h3>${video.title}</h3>
+                            <p>${video.description}</p>
+                            <div class="video-player">
+                                <video id="video-${video.id}" controls>
+                                    <source type="video/mp4">
+                                    Your browser does not support the video tag.
+                                </video>
+                                <div class="loading">Loading video...</div>
+                            </div>
+                            <div class="video-info">
+                                Views: ${video.views_count} | 
+                                Likes: ${video.likes_count} | 
+                                Comments: ${video.comments_count}
+                            </div>
+                        `;
+                        
+                        videoList.appendChild(videoContainer);
+                        
+                        const videoElement = videoContainer.querySelector('video');
+                        const loadingElement = videoContainer.querySelector('.loading');
+                        
+                        try {
+                            const videoUrl = await loadVideo('video', video.id);
+                            if (videoUrl) {
+                                videoElement.src = videoUrl;
+                                videoElement.onloadeddata = () => {
+                                    loadingElement.style.display = 'none';
+                                };
+                            } else {
+                                throw new Error('Failed to load video');
+                            }
+                        } catch (error) {
+                            loadingElement.textContent = 'Failed to load video';
+                            loadingElement.style.color = '#dc3545';
+                        }
+                    }
+                } else {
+                    videoList.innerHTML = '<div>No videos available</div>';
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                videoList.innerHTML = '<div class="error">Error loading videos</div>';
+            }
+        }
+
+        async function fetchSubjects() {
+            const subjectList = document.getElementById('subjectList');
+            if (!authToken) {
+                subjectList.innerHTML = '<div class="error">Authentication required</div>';
+                return;
+            }
+
+            subjectList.innerHTML = '<div class="loading">Loading subjects...</div>';
+
+            try {
+                const response = await fetch('http://127.0.0.1:8000/api/subjects', {
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`,
+                        'Accept': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        handleAuthError();
+                        return;
+                    }
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const subjects = await response.json();
+                
+                if (subjects && subjects.length > 0) {
+                    subjectList.innerHTML = '';
+                    
+                    for (const subject of subjects) {
+                        const subjectCard = document.createElement('div');
+                        subjectCard.className = 'subject-card';
+                        subjectCard.innerHTML = `
+                            <h3>${subject.name}</h3>
+                            <p>${subject.description}</p>
+                            <button onclick="loadSubjectLessons(${subject.id})">Load Lessons</button>
+                            <div id="subject-lessons-${subject.id}" class="lesson-list"></div>
+                        `;
+                        
+                        subjectList.appendChild(subjectCard);
+                    }
+                } else {
+                    subjectList.innerHTML = '<div>No subjects available</div>';
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                subjectList.innerHTML = '<div class="error">Error loading subjects</div>';
+            }
+        }
+
+        async function loadSubjectLessons(subjectId) {
+            const lessonContainer = document.getElementById(`subject-lessons-${subjectId}`);
+            lessonContainer.innerHTML = '<div class="loading">Loading lessons...</div>';
+
+            try {
+                const response = await fetch(`http://127.0.0.1:8000/api/subjects/${subjectId}`, {
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`,
+                        'Accept': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        handleAuthError();
+                        return;
+                    }
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const subject = await response.json();
+                
+                if (subject.lessons && subject.lessons.length > 0) {
+                    lessonContainer.innerHTML = '';
+                    
+                    for (const lesson of subject.lessons) {
+                        const lessonElement = document.createElement('div');
+                        lessonElement.className = 'lesson-item';
+                        lessonElement.innerHTML = `
+                            <h4>${lesson.title}</h4>
+                            <p>${lesson.description}</p>
+                            <div class="video-player">
+                                <video id="lesson-video-${lesson.id}" controls>
+                                    <source type="video/mp4">
+                                    Your browser does not support the video tag.
+                                </video>
+                                <div class="loading">Loading video...</div>
+                            </div>
+                            <div class="video-info">
+                                <span>Duration: ${formatDuration(lesson.duration)}</span>
+                                <span>Views: ${lesson.views_count || 0}</span>
+                                <span class="status-badge ${lesson.is_active ? 'active' : 'inactive'}">
+                                    ${lesson.is_active ? 'Active' : 'Inactive'}
+                                </span>
+                            </div>
+                        `;
+                        
+                        lessonContainer.appendChild(lessonElement);
+                        
+                        const videoElement = lessonElement.querySelector('video');
+                        const loadingElement = lessonElement.querySelector('.loading');
+                        
+                        try {
+                            const videoUrl = await loadVideo('lesson', lesson.id);
+                            if (videoUrl) {
+                                videoElement.src = videoUrl;
+                                videoElement.onloadeddata = () => {
+                                    loadingElement.style.display = 'none';
+                                };
+                            } else {
+                                throw new Error('Failed to load video');
+                            }
+                        } catch (error) {
+                            loadingElement.textContent = 'Failed to load video';
+                            loadingElement.style.color = '#dc3545';
+                        }
+                    }
+                } else {
+                    lessonContainer.innerHTML = '<div>No lessons available for this subject</div>';
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                lessonContainer.innerHTML = '<div class="error">Error loading lessons</div>';
+            }
+        }
+
+        async function fetchPodcasts() {
+            const podcastList = document.getElementById('podcastList');
+            if (!authToken) {
+                podcastList.innerHTML = '<div class="error">Authentication required</div>';
+                return;
+            }
+
+            podcastList.innerHTML = '<div class="loading">Loading podcasts...</div>';
+
+            try {
+                const response = await fetch('http://127.0.0.1:8000/api/podcasts', {
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`,
+                        'Accept': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        handleAuthError();
+                        return;
+                    }
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                
+                if (data.data && data.data.length > 0) {
+                    podcastList.innerHTML = '';
+                    
+                    for (const podcast of data.data) {
+                        const podcastContainer = document.createElement('div');
+                        podcastContainer.className = 'podcast-container';
+                        podcastContainer.innerHTML = `
+                            <h3>${podcast.title}</h3>
+                            <p>${podcast.description}</p>
+                            <audio id="podcast-${podcast.id}" class="audio-player" controls crossorigin="anonymous" preload="metadata" onplay="incrementPodcastPlays(${podcast.id})">
+                                Your browser does not support the audio element.
+                            </audio>
+                            <div class="podcast-info">
+                                Views: ${podcast.plays_count || 0} | 
+                                Likes: ${podcast.likes_count || 0} | 
+                                Comments: ${podcast.comments_count || 0}
+                            </div>
+                        `;
+                        
+                        podcastList.appendChild(podcastContainer);
+                        
+                        // Set up audio source with authentication
+                        const audioElement = podcastContainer.querySelector('audio');
+                        setupPodcastAudio(audioElement, podcast.id);
+                    }
+                } else {
+                    podcastList.innerHTML = '<div>No podcasts available</div>';
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                podcastList.innerHTML = '<div class="error">Error loading podcasts</div>';
+            }
+        }
+        
+        function setupPodcastAudio(audioElement, podcastId) {
+            console.log(`Setting up audio for podcast ID: ${podcastId}`);
+            
+            // We'll use the show endpoint which now returns a full URL for the audio
+            fetch(`http://127.0.0.1:8000/api/podcasts/${podcastId}`, {
+                headers: {
+                    'Authorization': `Bearer ${authToken}`,
+                    'Accept': 'application/json'
+                }
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`Failed to load podcast details: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(podcast => {
+                console.log('Podcast details received:', podcast);
+                
+                if (!podcast.audio_url) {
+                    throw new Error('Audio URL not found in podcast details');
+                }
+                
+                // Set the audio source directly from the podcast details
+                // The PodcastController now returns a full URL in the audio_url field
+                audioElement.src = podcast.audio_url;
+                audioElement.load();
+                
+                // Add error handler
+                audioElement.onerror = (event) => {
+                    console.error('Audio element error:', event);
+                    const errorText = document.createElement('p');
+                    errorText.textContent = 'Error loading audio file';
+                    errorText.style.color = '#dc3545';
+                    audioElement.parentNode.insertBefore(errorText, audioElement.nextSibling);
+                };
+            })
+            .catch(error => {
+                console.error('Error loading podcast audio:', error);
+                const errorText = document.createElement('p');
+                errorText.textContent = 'Failed to load audio: ' + error.message;
+                errorText.style.color = '#dc3545';
+                audioElement.parentNode.insertBefore(errorText, audioElement.nextSibling);
+            });
+        }
+
+        async function incrementPodcastPlays(podcastId) {
+            try {
+                await fetch(`http://127.0.0.1:8000/api/podcasts/${podcastId}/play`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`,
+                        'Accept': 'application/json'
+                    }
+                });
+            } catch (error) {
+                console.error('Error incrementing plays:', error);
+            }
+        }
+
+        function formatDuration(seconds) {
+            if (!seconds) return '00:00';
+            const minutes = Math.floor(seconds / 60);
+            const remainingSeconds = seconds % 60;
+            return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+        }
+
+        function handleAuthError() {
+            localStorage.removeItem('authToken');
+            authToken = null;
+            updateAuthStatus(false);
+            document.getElementById('subjectList').innerHTML = '<div class="error">Invalid or expired token</div>';
+            document.getElementById('videoList').innerHTML = '<div class="error">Invalid or expired token</div>';
+            document.getElementById('podcastList').innerHTML = '<div class="error">Invalid or expired token</div>';
+        }
+
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab-button').forEach(button => {
+                button.classList.remove('active');
+            });
+            document.querySelector(`.tab-button[onclick="switchTab('${tabName}')"]`).classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById(tabName).classList.add('active');
+
+            // Load content if needed
+            if (tabName === 'videos') {
+                fetchVideos();
+            } else if (tabName === 'subjects') {
+                fetchSubjects();
+            } else if (tabName === 'podcasts') {
+                fetchPodcasts();
+            }
+        }
+
+        // Initialize
+        if (authToken) {
+            updateAuthStatus(true);
+            fetchVideos();
+            fetchSubjects();
+            fetchPodcasts();
+        } else {
+            updateAuthStatus(false);
+        }
+    </script>
+</body>
+</html>
