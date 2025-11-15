@@ -18,6 +18,30 @@ class RouteServiceProvider extends ServiceProvider
             return Limit::perMinute(60)->by($request->user()?->id ?: $request->ip());
         });
 
+        RateLimiter::for('auth-sensitive', function (Request $request) {
+            $identifier = strtolower($request->input('email') ?? $request->ip());
+
+            return Limit::perMinute(10)
+                ->by($identifier . '|' . $request->ip())
+                ->response(function () {
+                    return response()->json([
+                        'message' => 'عدد المحاولات كبير جداً، يرجى المحاولة لاحقاً.'
+                    ], 429);
+                });
+        });
+
+        RateLimiter::for('otp-sensitive', function (Request $request) {
+            $identifier = strtolower($request->input('email') ?? $request->ip());
+
+            return Limit::perMinutes(5, 5)
+                ->by('otp|' . $identifier)
+                ->response(function () {
+                    return response()->json([
+                        'message' => 'تم تجاوز الحد المسموح لمحاولات التحقق. حاول بعد قليل.'
+                    ], 429);
+                });
+        });
+
         $this->routes(function () {
             Route::middleware('api')
                 ->prefix('api')

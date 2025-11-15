@@ -3,11 +3,13 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Like;
 use App\Models\Video;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use Illuminate\Http\Request;
 
 /**
  * @OA\Tag(
@@ -113,13 +115,85 @@ class VideoController extends Controller
      *     )
      * )
      */
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
-        $videos = Video::where('is_active', true)
-            ->with('user:id,name')
-            ->withCount(['likes', 'comments'])
-            ->latest()
-            ->paginate(20);
+        $query = Video::query()
+            ->where('is_active', true)
+            ->with(['user:id,name', 'lastComment.user:id,name'])
+            ->withCount(['likes', 'comments']);
+
+        if ($search = $request->get('search')) {
+            $query->where(function ($q) use ($search) {
+                $q->where('title', 'like', '%' . $search . '%')
+                    ->orWhere('description', 'like', '%' . $search . '%');
+            });
+        }
+
+        $perPage = max(1, min((int) $request->integer('per_page', 20), 100));
+        $mode = strtolower($request->get('mode', 'feed'));
+        $sortField = $request->get('sort');
+        $order = strtolower($request->get('order', 'desc')) === 'asc' ? 'asc' : 'desc';
+        $sortable = ['created_at', 'views_count', 'likes_count', 'comments_count'];
+
+        if ($mode === 'chronological') {
+            $query->orderBy('created_at', $order);
+        } elseif ($sortField && in_array($sortField, $sortable, true)) {
+            $query->orderBy($sortField, $order);
+        } else {
+            $seed = $request->get('seed');
+
+            if (!$seed) {
+                $seed = $request->user()
+                    ? 'user-' . $request->user()->id
+                    : 'anon-' . $request->ip();
+            }
+
+            $query->feedRanked($seed);
+        }
+
+        $videos = $query->paginate($perPage);
+
+        $collection = $videos->getCollection();
+        $likedLookup = [];
+
+        if ($userId = optional($request->user())->id) {
+            $likedVideoIds = Like::query()
+                ->where('user_id', $userId)
+                ->whereIn('video_id', $collection->pluck('id'))
+                ->pluck('video_id')
+                ->all();
+
+            $likedLookup = array_fill_keys($likedVideoIds, true);
+        }
+
+        $collection->transform(function (Video $video) use ($likedLookup) {
+            $payload = $video->toArray();
+
+            $payload['is_liked_by_viewer'] = $likedLookup[$video->id] ?? false;
+            $payload['engagement_overview'] = [
+                'likes' => (int) ($video->likes_count ?? 0),
+                'comments' => (int) ($video->comments_count ?? 0),
+                'views' => (int) ($video->views_count ?? 0),
+                'ranking_score' => isset($video->ranking_score)
+                    ? round((float) $video->ranking_score, 4)
+                    : null,
+            ];
+
+            $lastComment = $video->lastComment;
+            $payload['last_comment'] = $lastComment ? [
+                'id' => $lastComment->id,
+                'content' => $lastComment->content,
+                'created_at' => $lastComment->created_at,
+                'user' => $lastComment->user ? [
+                    'id' => $lastComment->user->id,
+                    'name' => $lastComment->user->name,
+                ] : null,
+            ] : null;
+
+            return $payload;
+        });
+
+        $videos->setCollection($collection);
 
         return response()->json($videos);
     }
@@ -251,7 +325,8 @@ class VideoController extends Controller
             abort(404);
         }
 
-        $path = storage_path('app/public/videos/' . basename($video->video_url));
+        $storagePath = ltrim($video->video_url, '/');
+        $path = storage_path('app/public/' . $storagePath);
 
         if (!file_exists($path)) {
             abort(404);
@@ -303,5 +378,100 @@ class VideoController extends Controller
             200,
             $headers
         );
+    }
+    
+    public function store(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $validated = $request->validate([
+            'title' => 'required|string|max:255',
+            'description' => 'required|string',
+            'video' => 'required|file|mimes:mp4,avi,mov,mkv,webm|max:153600', // 150MB
+            'thumbnail' => 'nullable|image|max:5120',
+        ]);
+
+        $videoFile = $request->file('video');
+        $videoFilename = uniqid('user_' . $user->id . '_') . '.' . $videoFile->getClientOriginalExtension();
+        $videoPath = $videoFile->storeAs('videos', $videoFilename, 'public');
+
+        $thumbnailPath = null;
+        if ($request->hasFile('thumbnail')) {
+            $thumbnailFile = $request->file('thumbnail');
+            $thumbnailFilename = uniqid('thumb_' . $user->id . '_') . '.' . $thumbnailFile->getClientOriginalExtension();
+            $thumbnailPath = $thumbnailFile->storeAs('thumbnails', $thumbnailFilename, 'public');
+        }
+
+        $video = Video::create([
+            'title' => $validated['title'],
+            'description' => $validated['description'],
+            'video_url' => $videoPath,
+            'thumbnail_url' => $thumbnailPath,
+            'is_active' => false,
+            'user_id' => $user->id,
+        ]);
+
+        return response()->json([
+            'message' => 'تم رفع الفيديو وهو في انتظار المراجعة',
+            'video' => $video->only([
+                'id',
+                'title',
+                'description',
+                'video_url',
+                'thumbnail_url',
+                'is_active',
+                'created_at',
+            ]),
+        ], Response::HTTP_CREATED);
+    }
+
+    public function myVideos(Request $request): JsonResponse
+    {
+        $videos = Video::where('user_id', $request->user()->id)
+            ->withCount(['likes', 'comments'])
+            ->latest()
+            ->get()
+            ->map(function (Video $video) {
+                return [
+                    'id' => $video->id,
+                    'title' => $video->title,
+                    'description' => $video->description,
+                    'video_url' => $video->video_url,
+                    'thumbnail_url' => $video->thumbnail_url,
+                    'views_count' => $video->views_count,
+                    'likes_count' => $video->likes_count ?? 0,
+                    'comments_count' => $video->comments_count ?? 0,
+                    'status' => $video->is_active ? 'accepted' : 'pending',
+                    'created_at' => $video->created_at,
+                    'updated_at' => $video->updated_at,
+                ];
+            });
+
+        return response()->json([
+            'data' => $videos,
+        ]);
+    }
+
+    public function myVideoDetails(Video $video, Request $request): JsonResponse
+    {
+        if ($video->user_id !== $request->user()->id) {
+            return response()->json(['message' => 'Video not found'], 404);
+        }
+
+        $video->loadCount(['likes', 'comments']);
+
+        return response()->json([
+            'id' => $video->id,
+            'title' => $video->title,
+            'description' => $video->description,
+            'video_url' => $video->video_url,
+            'thumbnail_url' => $video->thumbnail_url,
+            'views_count' => $video->views_count,
+            'likes_count' => $video->likes_count,
+            'comments_count' => $video->comments_count,
+            'status' => $video->is_active ? 'accepted' : 'pending',
+            'created_at' => $video->created_at,
+            'updated_at' => $video->updated_at,
+        ]);
     }
 }

@@ -4,178 +4,236 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
-use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Validation\Rules\Password as PasswordRule;
-use Illuminate\Validation\ValidationException;
+use Illuminate\Support\Facades\Mail;
+use Carbon\Carbon;
 
-/**
- * @OA\Tag(
- *     name="Authentication",
- *     description="API Endpoints for user authentication"
- * )
- */
 class AuthController extends Controller
 {
-    /**
-     * @OA\Post(
-     *     path="/api/register",
-     *     summary="Register a new user",
-     *     tags={"Authentication"},
-     *     @OA\RequestBody(
-     *         required=true,
-     *         @OA\JsonContent(
-     *             required={"name", "email", "password", "password_confirmation"},
-     *             @OA\Property(property="name", type="string", example="John Doe"),
-     *             @OA\Property(property="email", type="string", format="email", example="john@example.com"),
-     *             @OA\Property(property="password", type="string", format="password", example="password123"),
-     *             @OA\Property(property="password_confirmation", type="string", format="password", example="password123")
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=201,
-     *         description="User registered successfully",
-     *         @OA\JsonContent(
-     *             @OA\Property(property="token", type="string", example="1|laravel_sanctum_token"),
-     *             @OA\Property(property="user", type="object",
-     *                 @OA\Property(property="id", type="integer", example=1),
-     *                 @OA\Property(property="name", type="string", example="John Doe"),
-     *                 @OA\Property(property="email", type="string", format="email", example="john@example.com")
-     *             )
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=422,
-     *         description="Validation error"
-     *     )
-     * )
-     */
-    public function register(Request $request): JsonResponse
+    // تسجيل مستخدم جديد وإرسال OTP
+    public function register(Request $request)
     {
         $request->validate([
-            'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'string', 'email', 'max:255', 'unique:users'],
-            'password' => ['required', 'confirmed', PasswordRule::defaults()],
+            'name'     => 'required|string|max:255',
+            'email'    => 'required|email|max:255|unique:users,email',
+            'password' => 'required|min:6',
         ]);
+
+        $otp = rand(100000, 999999);
 
         $user = User::create([
-            'name' => $request->name,
-            'email' => $request->email,
-            'password' => Hash::make($request->password),
-            'role' => 'user', // Default role is user
+            'name'       => $request->name,
+            'email'      => $request->email,
+            'password'   => Hash::make($request->password),
+            'otp_code'   => $otp,
+            'otp_expires_at' => Carbon::now()->addMinutes(10),
         ]);
 
-        $token = $user->createToken('auth_token')->plainTextToken;
+        try {
+            Mail::raw("رمز التحقق الخاص بك هو: $otp", function ($message) use ($request) {
+                $message->to($request->email)
+                        ->subject('رمز التحقق');
+            });
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'حدث خطأ أثناء إرسال رمز التحقق',
+                'error'   => $e->getMessage()
+            ], 500);
+        }
 
         return response()->json([
-            'token' => $token,
-            'user' => $user
+            'message'  => 'تم إرسال رمز التحقق إلى البريد الإلكتروني',
+            'user_id'  => $user->id,
+            'otp_code' => app()->environment('local') ? $otp : null
         ], 201);
     }
 
-    /**
-     * @OA\Post(
-     *     path="/api/login",
-     *     summary="Login user",
-     *     tags={"Authentication"},
-     *     @OA\RequestBody(
-     *         required=true,
-     *         @OA\JsonContent(
-     *             required={"email", "password"},
-     *             @OA\Property(property="email", type="string", format="email", example="john@example.com"),
-     *             @OA\Property(property="password", type="string", format="password", example="password123")
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=200,
-     *         description="Login successful",
-     *         @OA\JsonContent(
-     *             @OA\Property(property="token", type="string", example="1|laravel_sanctum_token"),
-     *             @OA\Property(property="user", type="object",
-     *                 @OA\Property(property="id", type="integer", example=1),
-     *                 @OA\Property(property="name", type="string", example="John Doe"),
-     *                 @OA\Property(property="email", type="string", format="email", example="john@example.com")
-     *             )
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=401,
-     *         description="Invalid credentials"
-     *     )
-     * )
-     */
-    public function login(Request $request): JsonResponse
+    // التحقق من OTP وتفعيل الحساب
+    public function verifyOtp(Request $request)
     {
         $request->validate([
-            'email' => ['required', 'string', 'email'],
-            'password' => ['required', 'string'],
+            'email'    => 'required|email',
+            'otp_code' => 'required|numeric',
+        ]);
+    
+        $user = User::where('email', $request->email)->first();
+    
+        if (!$user) {
+            return response()->json(['message' => 'البريد الإلكتروني غير مسجل'], 404);
+        }
+    
+        if ($user->email_verified_at) {
+            return response()->json(['message' => 'الحساب مؤكد بالفعل'], 400);
+        }
+    
+        if ($user->otp_code != $request->otp_code) {
+            return response()->json(['message' => 'رمز التحقق غير صحيح'], 422);
+        }
+    
+        if ($user->otp_expires_at && Carbon::now()->greaterThan($user->otp_expires_at)) {
+            return response()->json(['message' => 'انتهت صلاحية رمز التحقق'], 422);
+        }
+    
+        // تحديث حالة التفعيل
+        $user->update([
+            'email_verified_at' => Carbon::now(),
+            'email_verified'    => true,
+            'otp_code'          => null,
+            'otp_expires_at'    => null,
+        ]);
+    
+        // ✅ هنا بنعمل تسجيل دخول تلقائي بعد التأكيد
+        $accessToken = $user->createToken('auth_token')->plainTextToken;
+        $user->access_token_expires_at = Carbon::now()->addMinutes(30);
+    
+        $refreshToken = bin2hex(random_bytes(64));
+        $user->refresh_token = Hash::make($refreshToken);
+        $user->refresh_token_expires_at = Carbon::now()->addDays(7);
+        $user->save();
+
+        return response()->json([
+            'message'                  => 'تم تأكيد الحساب وتسجيل الدخول بنجاح',
+            'access_token'             => $accessToken,
+            'access_token_expires_at'  => $user->access_token_expires_at,
+            'refresh_token'            => $refreshToken,
+            'refresh_token_expires_at' => $user->refresh_token_expires_at,
+            'user'                     => $user->only(['id','name','email','email_verified_at','created_at','updated_at'])
+        ], 200);
+    }
+
+    // تسجيل الدخول
+    public function login(Request $request)
+    {
+        $request->validate([
+            'email'    => 'required|email',
+            'password' => 'required',
         ]);
 
         $user = User::where('email', $request->email)->first();
 
         if (!$user || !Hash::check($request->password, $user->password)) {
-            throw ValidationException::withMessages([
-                'email' => ['The provided credentials are incorrect.'],
-            ]);
+            return response()->json(['message' => 'بيانات الدخول غير صحيحة'], 401);
         }
 
-        $token = $user->createToken('auth_token')->plainTextToken;
+        if (!$user->email_verified_at) {
+            return response()->json(['message' => 'يجب تأكيد الحساب أولاً'], 403);
+        }
+
+        // امسح أي Access Tokens قديمة
+        $user->tokens()->delete();
+
+        // إنشاء Access Token وصلاحية 30 دقيقة
+        $accessToken = $user->createToken('auth_token')->plainTextToken;
+        $user->access_token_expires_at = Carbon::now()->addMinutes(30);
+
+        // إنشاء Refresh Token وصلاحية 7 أيام
+        $refreshToken = bin2hex(random_bytes(64));
+        $user->refresh_token = Hash::make($refreshToken);
+        $user->refresh_token_expires_at = Carbon::now()->addDays(7);
+        $user->save();
 
         return response()->json([
-            'token' => $token,
-            'user' => $user
+            'message'                  => 'تم تسجيل الدخول',
+            'access_token'             => $accessToken,
+            'access_token_expires_at'  => $user->access_token_expires_at,
+            'refresh_token'            => $refreshToken,
+            'refresh_token_expires_at' => $user->refresh_token_expires_at,
+            'user'                     => $user->only(['id','name','email','email_verified_at','created_at','updated_at'])
+        ], 200);
+    }
+
+    // تجديد Access Token باستخدام Refresh Token
+    public function refreshToken(Request $request)
+    {
+        $request->validate(['refresh_token' => 'required|string']);
+
+        $user = User::whereNotNull('refresh_token')->get()
+            ->first(function ($u) use ($request) {
+                return Hash::check($request->refresh_token, $u->refresh_token);
+            });
+
+        if (!$user) {
+            return response()->json(['message' => 'Refresh Token غير صالح'], 401);
+        }
+
+        if (Carbon::now()->greaterThan($user->refresh_token_expires_at)) {
+            $user->update([
+                'refresh_token'            => null,
+                'refresh_token_expires_at' => null
+            ]);
+            return response()->json(['message' => 'Refresh Token منتهي الصلاحية'], 401);
+        }
+
+        // امسح أي Access Tokens قديمة
+        $user->tokens()->delete();
+
+        // أنشئ Access Token جديد
+        $accessToken = $user->createToken('auth_token')->plainTextToken;
+        $user->access_token_expires_at = Carbon::now()->addMinutes(30);
+        $user->save();
+
+        return response()->json([
+            'message'                 => 'تم تجديد التوكن بنجاح',
+            'access_token'            => $accessToken,
+            'access_token_expires_at' => $user->access_token_expires_at
+        ], 200);
+    }
+
+    // بيانات المستخدم الحالي
+    public function user(Request $request)
+    {
+        return response()->json(
+            $request->user()->only(['id','name','email','email_verified_at','created_at','updated_at']),
+            200
+        );
+    }
+
+    // تسجيل الخروج
+    public function logout(Request $request)
+    {
+        try {
+            $request->user()->tokens()->delete();
+            $request->user()->update([
+                'refresh_token'            => null,
+                'refresh_token_expires_at' => null,
+                'access_token_expires_at'  => null
+            ]);
+
+            return response()->json(['message' => 'تم تسجيل الخروج بنجاح'], 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'حدث خطأ أثناء تسجيل الخروج',
+                'error'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    // داخل AuthController أو الأفضل MediaController
+    public function uploadVideo(Request $request)
+    {
+        // ✅ تحقق من صحة الملف
+        $request->validate([
+            'video' => 'required|file|mimes:mp4,mov,avi,wmv,flv|max:51200', // 50MB
         ]);
-    }
 
-    /**
-     * @OA\Post(
-     *     path="/api/logout",
-     *     summary="Logout user",
-     *     tags={"Authentication"},
-     *     security={{"bearerAuth": {}}},
-     *     @OA\Response(
-     *         response=200,
-     *         description="Logout successful",
-     *         @OA\JsonContent(
-     *             @OA\Property(property="message", type="string", example="Logged out successfully")
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=401,
-     *         description="Unauthenticated"
-     *     )
-     * )
-     */
-    public function logout(Request $request): JsonResponse
-    {
-        $request->user()->currentAccessToken()->delete();
-        return response()->json(['message' => 'Successfully logged out']);
-    }
+        try {
+            // احفظ الملف داخل storage/app/public/videos
+            $path = $request->file('video')->store('videos', 'public');
 
-    /**
-     * @OA\Get(
-     *     path="/api/user",
-     *     summary="Get authenticated user profile",
-     *     tags={"Authentication"},
-     *     security={{"bearerAuth": {}}},
-     *     @OA\Response(
-     *         response=200,
-     *         description="User profile retrieved successfully",
-     *         @OA\JsonContent(
-     *             @OA\Property(property="id", type="integer", example=1),
-     *             @OA\Property(property="name", type="string", example="John Doe"),
-     *             @OA\Property(property="email", type="string", format="email", example="john@example.com")
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=401,
-     *         description="Unauthenticated"
-     *     )
-     * )
-     */
-    public function user(Request $request): JsonResponse
-    {
-        return response()->json($request->user());
+            // رجّع رابط الوصول للفيديو
+            $url = asset('storage/' . $path);
+
+            return response()->json([
+                'message' => 'تم رفع الفيديو بنجاح',
+                'video_url' => $url,
+            ], 201);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'حدث خطأ أثناء رفع الفيديو',
+                'error'   => $e->getMessage()
+            ], 500);
+        }
     }
 }

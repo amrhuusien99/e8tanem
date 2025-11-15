@@ -185,4 +185,9 @@ class VideoResource extends Resource
     {
         return static::getModel()::count();
     }
+
+    public static function getNavigationItems(): array
+    {
+        return parent::getNavigationItems();
+    }
 }

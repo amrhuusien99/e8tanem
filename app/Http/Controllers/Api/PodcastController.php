@@ -6,6 +6,8 @@ use App\Http\Controllers\Controller;
 use App\Models\Podcast;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class PodcastController extends Controller
 {
@@ -151,10 +153,18 @@ class PodcastController extends Controller
     {
         // Load the user relationship
         $podcast->load('user:id,name');
-        
-        // Create the full URL to the audio file
-        $podcast->audio_url = url('storage/' . $podcast->audio_url);
-        
+
+        $relativeAudioPath = ltrim($podcast->audio_url, '/');
+        $audioFullPath = storage_path('app/public/' . $relativeAudioPath);
+
+        $podcast->audio_url = Storage::url($relativeAudioPath);
+        $podcast->audio_mime = file_exists($audioFullPath) ? mime_content_type($audioFullPath) : 'audio/mpeg';
+        $podcast->audio_size = file_exists($audioFullPath) ? filesize($audioFullPath) : null;
+
+        if ($podcast->thumbnail_url) {
+            $podcast->thumbnail_url = Storage::url($podcast->thumbnail_url);
+        }
+
         return response()->json($podcast);
     }
 
@@ -213,30 +223,100 @@ class PodcastController extends Controller
      *     )
      * )
      */
-    public function stream(Podcast $podcast): JsonResponse
+    public function stream(Podcast $podcast): StreamedResponse|JsonResponse
     {
         if (!$podcast->is_active) {
             return response()->json(['message' => 'Podcast not found'], 404);
         }
-        
-        // Check if file exists
-        $relativePath = $podcast->audio_url;
+
+        $relativePath = ltrim($podcast->audio_url, '/');
         $fullPath = storage_path('app/public/' . $relativePath);
-        
+
         if (!file_exists($fullPath)) {
             return response()->json(['message' => 'Audio file not found'], 404);
         }
-        
-        // Create a full URL to the audio file in storage
-        $audioUrl = url('storage/' . $relativePath);
-        
-        return response()->json([
-            'audio_url' => $audioUrl,
-            'title' => $podcast->title,
-            'podcast_id' => $podcast->id
-        ])->header('Access-Control-Allow-Origin', '*')
-          ->header('Access-Control-Allow-Methods', 'GET')
-          ->header('Content-Type', 'application/json')
-          ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+        $size = filesize($fullPath);
+        $start = 0;
+        $end = $size - 1;
+        $mimeType = mime_content_type($fullPath) ?: 'audio/mpeg';
+        $fileName = basename($relativePath);
+
+        $headers = [
+            'Content-Type' => $mimeType,
+            'Accept-Ranges' => 'bytes',
+            'Cache-Control' => 'public, max-age=86400',
+            'Content-Disposition' => 'inline; filename="' . $fileName . '"',
+        ];
+
+        if ($range = request()->header('Range')) {
+            $range = str_replace('bytes=', '', $range);
+            [$start, $rangeEnd] = array_pad(explode('-', $range), 2, null);
+            $start = (int) $start;
+            $end = $rangeEnd !== null ? (int) $rangeEnd : $end;
+            $end = min($end, $size - 1);
+            $length = $end - $start + 1;
+
+            $headers['Content-Length'] = $length;
+            $headers['Content-Range'] = "bytes $start-$end/$size";
+
+            return response()->stream(function () use ($fullPath, $start, $length) {
+                $handle = fopen($fullPath, 'rb');
+                fseek($handle, $start);
+                echo fread($handle, $length);
+                fclose($handle);
+            }, 206, $headers);
+        }
+
+        $headers['Content-Length'] = $size;
+
+        return response()->stream(function () use ($fullPath) {
+            $handle = fopen($fullPath, 'rb');
+            while (!feof($handle)) {
+                echo fread($handle, 8192);
+                flush();
+            }
+            fclose($handle);
+        }, 200, $headers);
+    }
+
+    /**
+     * @OA\Get(
+     *     path="/api/podcasts/{podcast}/download",
+     *     summary="Download podcast audio file",
+     *     tags={"Podcasts"},
+     *     @OA\Parameter(
+     *         name="podcast",
+     *         in="path",
+     *         required=true,
+     *         description="ID of the podcast to download",
+     *         @OA\Schema(type="integer")
+     *     ),
+     *     @OA\Response(
+     *         response=200,
+     *         description="File download response",
+     *         @OA\Header(header="Content-Disposition", description="attachment; filename=...", @OA\Schema(type="string"))
+     *     ),
+     *     @OA\Response(response=404, description="Podcast not found or file missing")
+     * )
+     */
+    public function download(Podcast $podcast)
+    {
+        if (!$podcast->is_active) {
+            return response()->json(['message' => 'Podcast not found'], 404);
+        }
+
+        $path = $podcast->audio_url;
+        if (!$path || !Storage::disk('public')->exists($path)) {
+            return response()->json(['message' => 'Audio file not found'], 404);
+        }
+
+        $fullPath = Storage::disk('public')->path($path);
+        $fileName = basename($path);
+        $mimeType = mime_content_type($fullPath) ?: 'audio/mpeg';
+
+        return response()->download($fullPath, $fileName, [
+            'Content-Type' => $mimeType,
+        ]);
     }
 }

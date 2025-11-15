@@ -23,6 +23,12 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
+        'otp_code',
+        'email_verified',
+        'email_verified_at',
+        'api_token',
+        'refresh_token',
+        'refresh_token_expires_at',
         'role',
     ];
 
