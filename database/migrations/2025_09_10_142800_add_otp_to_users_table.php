@@ -8,10 +8,17 @@ return new class extends Migration
 {
     public function up()
     {
-        Schema::table('users', function (Blueprint $table) {
-            $table->boolean('email_verified')->default(false);
-            $table->string('otp_code')->nullable();
-        });
+        if (!Schema::hasColumn('users', 'email_verified') || !Schema::hasColumn('users', 'otp_code')) {
+            Schema::table('users', function (Blueprint $table) {
+                if (!Schema::hasColumn('users', 'email_verified')) {
+                    $table->boolean('email_verified')->default(false);
+                }
+
+                if (!Schema::hasColumn('users', 'otp_code')) {
+                    $table->string('otp_code')->nullable();
+                }
+            });
+        }
     }
 
     public function down()
@@ -20,7 +27,10 @@ return new class extends Migration
             if (Schema::hasColumn('users', 'otp_code')) {
                 $table->dropColumn('otp_code');
             }
-            // email_verified مش موجود أصلاً، فبلاش نحذفه
+
+            if (Schema::hasColumn('users', 'email_verified')) {
+                $table->dropColumn('email_verified');
+            }
         });
     }
     
