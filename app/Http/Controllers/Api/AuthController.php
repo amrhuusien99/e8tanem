@@ -85,7 +85,7 @@ class AuthController extends Controller
     
         // ✅ هنا بنعمل تسجيل دخول تلقائي بعد التأكيد
         $accessToken = $user->createToken('auth_token')->plainTextToken;
-        $user->access_token_expires_at = Carbon::now()->addDays(30);
+        $user->access_token_expires_at = Carbon::now()->addDays(90);
     
         $refreshToken = bin2hex(random_bytes(64));
         $user->refresh_token = Hash::make($refreshToken);
@@ -123,9 +123,9 @@ class AuthController extends Controller
         // امسح أي Access Tokens قديمة
         $user->tokens()->delete();
 
-        // إنشاء Access Token وصلاحية 30 يوم
+        // إنشاء Access Token وصلاحية 90 يوم
         $accessToken = $user->createToken('auth_token')->plainTextToken;
-        $user->access_token_expires_at = Carbon::now()->addDays(30);
+        $user->access_token_expires_at = Carbon::now()->addDays(90);
 
         // إنشاء Refresh Token وصلاحية 90 يوم
         $refreshToken = bin2hex(random_bytes(64));
@@ -170,7 +170,7 @@ class AuthController extends Controller
 
         // أنشئ Access Token جديد
         $accessToken = $user->createToken('auth_token')->plainTextToken;
-        $user->access_token_expires_at = Carbon::now()->addDays(30);
+        $user->access_token_expires_at = Carbon::now()->addDays(90);
         $user->save();
 
         return response()->json([
