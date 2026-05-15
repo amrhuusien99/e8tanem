@@ -17,6 +17,56 @@ use Illuminate\Http\JsonResponse;
 class CommentController extends Controller
 {
     /**
+     * @OA\Get(
+     *     path="/api/videos/{video}/comments",
+     *     summary="List all comments for a video",
+     *     tags={"Comments"},
+     *     security={{"bearerAuth": {}}},
+     *     @OA\Parameter(
+     *         name="video",
+     *         in="path",
+     *         required=true,
+     *         description="ID of the video",
+     *         @OA\Schema(type="integer")
+     *     ),
+     *     @OA\Response(
+     *         response=200,
+     *         description="List of comments",
+     *         @OA\JsonContent(
+     *             type="array",
+     *             @OA\Items(
+     *                 @OA\Property(property="id", type="integer"),
+     *                 @OA\Property(property="content", type="string"),
+     *                 @OA\Property(property="user", type="object",
+     *                     @OA\Property(property="id", type="integer"),
+     *                     @OA\Property(property="name", type="string")
+     *                 ),
+     *                 @OA\Property(property="created_at", type="string", format="date-time")
+     *             )
+     *         )
+     *     ),
+     *     @OA\Response(
+     *         response=401,
+     *         description="Unauthenticated"
+     *     ),
+     *     @OA\Response(
+     *         response=404,
+     *         description="Video not found"
+     *     )
+     * )
+     */
+    public function index(Video $video): JsonResponse
+    {
+        $comments = $video->comments()
+            ->where('is_active', true)
+            ->with('user:id,name')
+            ->orderByDesc('created_at')
+            ->get();
+
+        return response()->json($comments);
+    }
+
+    /**
      * @OA\Post(
      *     path="/api/videos/{video}/comments",
      *     summary="Add a comment to a video",
