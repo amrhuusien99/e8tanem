@@ -131,14 +131,23 @@ class VideoController extends Controller
         }
 
         $userId = optional($request->user())->id;
-        $excludeSeen = $userId && !$search;
+        $prioritizeUnseen = $userId && !$search;
 
-        if ($excludeSeen) {
-            $query->whereNotIn('id', function ($sub) use ($userId) {
+        if ($prioritizeUnseen) {
+            $hasUnseen = (clone $query)->whereNotIn('id', function ($sub) use ($userId) {
                 $sub->select('video_id')
                     ->from('video_views')
                     ->where('user_id', $userId);
-            });
+            })->exists();
+
+            if (!$hasUnseen && (clone $query)->exists()) {
+                VideoView::query()->where('user_id', $userId)->delete();
+            }
+
+            $query->selectRaw(
+                'EXISTS (SELECT 1 FROM video_views WHERE video_views.video_id = videos.id AND video_views.user_id = ?) as has_seen',
+                [$userId]
+            )->orderBy('has_seen');
         }
 
         $perPage = max(1, min((int) $request->integer('per_page', 20), 100));
@@ -165,11 +174,6 @@ class VideoController extends Controller
 
         $videos = $query->paginate($perPage);
 
-        if ($excludeSeen && $videos->total() === 0 && Video::query()->where('is_active', true)->exists()) {
-            VideoView::query()->where('user_id', $userId)->delete();
-            $videos = $query->paginate($perPage);
-        }
-
         $collection = $videos->getCollection();
         $likedLookup = [];
 
@@ -187,6 +191,8 @@ class VideoController extends Controller
             $payload = $video->toArray();
 
             $payload['is_liked_by_viewer'] = $likedLookup[$video->id] ?? false;
+            $payload['is_seen_by_viewer'] = isset($video->has_seen) ? (bool) $video->has_seen : null;
+            unset($payload['has_seen']);
             $payload['engagement_overview'] = [
                 'likes' => (int) ($video->likes_count ?? 0),
                 'comments' => (int) ($video->comments_count ?? 0),

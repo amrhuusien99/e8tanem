@@ -148,24 +148,31 @@ class VideoControllerTest extends TestCase
             ->assertJsonPath('data.0.engagement_overview.views', 25);
     }
 
-    public function test_watching_video_via_show_excludes_it_from_feed(): void
+    public function test_watched_video_is_moved_to_the_end_but_still_returned(): void
     {
+        $unseen = Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+            'created_at' => now()->subHour(),
+        ]);
+
         $seen = Video::factory()->create([
             'is_active' => true,
             'user_id' => $this->user->id,
-        ]);
-
-        Video::factory()->create([
-            'is_active' => true,
-            'user_id' => $this->user->id,
+            'created_at' => now(),
         ]);
 
         $this->actingAs($this->user)->getJson("/api/videos/{$seen->id}")->assertOk();
 
-        $response = $this->actingAs($this->user)->getJson('/api/videos');
+        $response = $this->actingAs($this->user)->getJson('/api/videos?mode=chronological');
 
-        $response->assertOk()->assertJsonCount(1, 'data');
-        $this->assertNotContains($seen->id, collect($response->json('data'))->pluck('id'));
+        $response->assertOk()->assertJsonCount(2, 'data');
+        $this->assertEquals(
+            [$unseen->id, $seen->id],
+            collect($response->json('data'))->pluck('id')->all()
+        );
+        $this->assertFalse(collect($response->json('data'))->firstWhere('id', $unseen->id)['is_seen_by_viewer']);
+        $this->assertTrue(collect($response->json('data'))->firstWhere('id', $seen->id)['is_seen_by_viewer']);
     }
 
     public function test_streaming_video_marks_it_seen_and_is_idempotent_across_range_requests(): void
@@ -197,25 +204,38 @@ class VideoControllerTest extends TestCase
         }
     }
 
-    public function test_search_still_returns_already_seen_videos(): void
+    public function test_search_ignores_seen_status_ordering(): void
     {
-        $video = Video::factory()->create([
+        $newerSeen = Video::factory()->create([
             'is_active' => true,
             'user_id' => $this->user->id,
-            'title' => 'UniqueSearchableTitle',
+            'title' => 'UniqueSearchableTitle Two',
+            'created_at' => now(),
+        ]);
+
+        $olderUnseen = Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+            'title' => 'UniqueSearchableTitle One',
+            'created_at' => now()->subHour(),
         ]);
 
         VideoView::factory()->create([
             'user_id' => $this->user->id,
-            'video_id' => $video->id,
+            'video_id' => $newerSeen->id,
         ]);
 
-        $response = $this->actingAs($this->user)->getJson('/api/videos?search=UniqueSearchableTitle');
+        $response = $this->actingAs($this->user)
+            ->getJson('/api/videos?search=UniqueSearchableTitle&mode=chronological');
 
-        $response->assertOk()->assertJsonCount(1, 'data');
+        $response->assertOk()->assertJsonCount(2, 'data');
+        $this->assertEquals(
+            [$newerSeen->id, $olderUnseen->id],
+            collect($response->json('data'))->pluck('id')->all()
+        );
     }
 
-    public function test_feed_resets_after_all_active_videos_are_seen(): void
+    public function test_seen_history_resets_once_all_active_videos_have_been_seen(): void
     {
         $videos = Video::factory()->count(2)->create([
             'is_active' => true,
@@ -233,24 +253,39 @@ class VideoControllerTest extends TestCase
 
         $response->assertOk()->assertJsonCount(2, 'data');
         $this->assertDatabaseCount('video_views', 0);
+        collect($response->json('data'))->each(function ($video) {
+            $this->assertFalse($video['is_seen_by_viewer']);
+        });
     }
 
-    public function test_seen_video_exclusion_is_scoped_per_user(): void
+    public function test_seen_priority_is_scoped_per_user(): void
     {
         $otherUser = User::factory()->create();
 
-        $video = Video::factory()->create([
+        $newer = Video::factory()->create([
             'is_active' => true,
             'user_id' => $this->user->id,
+            'created_at' => now(),
+        ]);
+
+        $older = Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+            'created_at' => now()->subHour(),
         ]);
 
         VideoView::factory()->create([
             'user_id' => $this->user->id,
-            'video_id' => $video->id,
+            'video_id' => $newer->id,
         ]);
 
-        $response = $this->actingAs($otherUser)->getJson('/api/videos');
+        $response = $this->actingAs($otherUser)->getJson('/api/videos?mode=chronological');
 
-        $response->assertOk()->assertJsonCount(1, 'data');
+        $response->assertOk()->assertJsonCount(2, 'data');
+        $this->assertEquals(
+            [$newer->id, $older->id],
+            collect($response->json('data'))->pluck('id')->all()
+        );
+        $this->assertFalse(collect($response->json('data'))->firstWhere('id', $newer->id)['is_seen_by_viewer']);
     }
 }

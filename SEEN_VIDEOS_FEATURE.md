@@ -1,4 +1,4 @@
-# Stop re-showing already-seen videos in the feed, with auto-reset on exhaustion
+# Stop re-showing already-seen videos first in the feed, with auto-reset on exhaustion
 
 ## Context
 
@@ -9,22 +9,33 @@ across requests — page 1 was always the same set of videos for a given user. T
 per-user "have I seen this" concept anywhere in the codebase (only a global
 `videos.views_count` counter and a `likes` pivot table existed).
 
-Goal: once a user has actually watched a video, it should stop appearing in their feed. When
-they've worked through every active video in the system, the feed resets and starts showing
-videos again from scratch (full cycle repeat), rather than showing an empty feed forever.
+Goal: once a user has actually watched a video, it should stop showing up at the top of their
+feed. When they've worked through every active video in the system, the feed resets so
+everything is treated as fresh again (full cycle repeat), rather than the feed staying
+permanently stuck in "everything already seen" order.
 
-Two design decisions were confirmed with the product owner before implementation:
+**Design note — revised after initial implementation:** the first version of this feature did
+a *hard exclusion* (`whereNotIn`), which shrank the returned page size as videos got watched
+(e.g. 19 videos → 17 → 2) and forced a reset the moment the unseen pool hit zero. Real
+usage through the mobile app surfaced that this breaks normal pagination UX — a feed page
+should always return a full `per_page` batch, not a dwindling one. The confirmed final
+behavior is a **soft reorder** instead: always return the full matching set (nothing is ever
+hidden), but sort unseen videos first and already-seen videos last. Once literally everything
+has been seen, the seen history resets so the next fetch naturally starts prioritizing
+"unseen" again (which, right after a reset, is everything).
+
+Two design decisions confirmed with the product owner:
 - A video counts as "seen" only when the client actually requests to **play** it (hits
   `show()` or `streamVideo()`), not merely when it's returned in a feed page. This avoids
   marking scrolled-past-but-unwatched videos as seen.
-- The seen-exclusion filter applies to the main feed listing in all its non-search modes
+- The seen-priority reordering applies to the main feed listing in all its non-search modes
   (default personalized `feedRanked`, `mode=chronological`, explicit `sort=`), but is skipped
-  whenever a `search` term is present, so users can always find/rewatch a specific video by
-  searching for it.
+  whenever a `search` term is present, so search results/order aren't disturbed by watch
+  history.
 
 ## Schema: `video_views` table / `VideoView` model
 
-New table mirroring the existing `likes` pivot pattern (see `app/Models/Like.php` and
+Table mirroring the existing `likes` pivot pattern (see `app/Models/Like.php` and
 `database/migrations/2025_04_24_095946_create_likes_table.php`):
 
 - Migration `database/migrations/2026_07_02_000000_create_video_views_table.php`:
@@ -35,8 +46,7 @@ New table mirroring the existing `likes` pivot pattern (see `app/Models/Like.php
 - Factory `database/factories/VideoViewFactory.php`, mirroring
   `database/factories/LikeFactory.php` (swap `Like` → `VideoView`).
 
-Purely additive — no backfill needed, since no "seen" concept existed before; an empty table
-is the correct starting state for every user.
+Purely additive — no backfill needed.
 
 ## Marking a video as seen
 
@@ -66,79 +76,93 @@ Called in:
   range requests call this method repeatedly per playback, `insertOrIgnore` keeps this a cheap
   no-op after the first hit.
 
-## Filtering the feed in `index()`
+## Reordering the feed in `index()` (current, final behavior)
 
 Right after the existing search-filter block and before the `mode`/`sort`/`feedRanked`
 branching:
 
 ```php
 $userId = optional($request->user())->id;
-$excludeSeen = $userId && !$search;
+$prioritizeUnseen = $userId && !$search;
 
-if ($excludeSeen) {
-    $query->whereNotIn('id', function ($sub) use ($userId) {
+if ($prioritizeUnseen) {
+    $hasUnseen = (clone $query)->whereNotIn('id', function ($sub) use ($userId) {
         $sub->select('video_id')->from('video_views')->where('user_id', $userId);
-    });
+    })->exists();
+
+    if (!$hasUnseen && (clone $query)->exists()) {
+        VideoView::query()->where('user_id', $userId)->delete();
+    }
+
+    $query->selectRaw(
+        'EXISTS (SELECT 1 FROM video_views WHERE video_views.video_id = videos.id AND video_views.user_id = ?) as has_seen',
+        [$userId]
+    )->orderBy('has_seen');
 }
 ```
 
-This compiles to a single correlated `NOT IN` subquery — no ID list pulled into PHP, portable
-across MySQL/SQLite, composes fine with `feedRanked()`'s `addSelect`/`orderByDesc`.
+- `EXISTS(...)` returns `0`/`1` portably on both MySQL and SQLite (no `LEAST`/`GREATEST`-style
+  dialect issue here).
+- `orderBy('has_seen')` is added **before** the `mode`/`sort`/`feedRanked` branch further down,
+  so it becomes the *primary* sort key — Laravel appends subsequent `orderBy`/`orderByDesc`
+  calls (chronological, explicit sort, or `feedRanked`'s `ranking_score`) as secondary
+  tie-breakers within each `has_seen` group.
+- Exhaustion is detected **upfront**, before the final query/pagination runs: `(clone
+  $query)->whereNotIn(...)->exists()` checks whether any unseen video remains under the
+  current filters; `(clone $query)->exists()` guards against resetting when the system
+  genuinely has zero matching videos (as opposed to the user having watched all of them).
+  `clone` is safe here — Eloquent's `Builder::__clone()` deep-clones the underlying query
+  builder, so branching off `$query` without mutating the original is the standard Laravel
+  pattern.
+- If exhausted, `video_views` for that user is deleted **before** the `has_seen` select/order
+  is attached — so the very same response already reflects the fresh state (no second
+  query/pagination pass needed, unlike the earlier hard-exclusion version).
+- `paginate($perPage)` always returns a full page — nothing is filtered out, so page size
+  never shrinks.
 
-After `$videos = $query->paginate($perPage);`, exhaustion detection and reset:
-
-```php
-if ($excludeSeen && $videos->total() === 0 && Video::query()->where('is_active', true)->exists()) {
-    VideoView::query()->where('user_id', $userId)->delete();
-    $videos = $query->paginate($perPage);
-}
-```
-
-- `$videos->total()` is already computed by `paginate()`'s count query — no extra query for
-  the zero-check.
-- The `exists()` check distinguishes "system genuinely has zero active videos" (leave the empty
-  page as-is) from "user has seen everything active" (reset and re-run).
-- Delete is scoped to `user_id` only — a full reset. Re-running `paginate()` on the same
-  builder is safe; the `whereNotIn` subquery now matches nothing, so all active videos come
-  back.
-- No changes needed to the existing `is_liked_by_viewer`/`engagement_overview`/`last_comment`
-  decoration logic — it operates on whatever collection `$videos` ends up holding.
+The response payload also exposes `is_seen_by_viewer` (boolean, `null` when the reorder wasn't
+applied, e.g. search) next to the existing `is_liked_by_viewer`, so clients can show a
+"watched" indicator if desired.
 
 ## Testing
 
-Added to `tests/Feature/Api/VideoControllerTest.php` (matches existing conventions:
-`RefreshDatabase`, factories, `actingAs`, `getJson`):
+`tests/Feature/Api/VideoControllerTest.php` (matches existing conventions: `RefreshDatabase`,
+factories, `actingAs`, `getJson`):
 
-1. Watching a video (via `show()`) removes it from subsequent `GET /videos` responses.
-2. Repeated `streamVideo()` calls (simulating range requests) produce only one `video_views`
-   row — proves `insertOrIgnore` avoids duplicate-key errors.
-3. `GET /videos?search=...` still returns a video the user has already seen.
-4. Once all active videos are marked seen, the next `GET /videos` call returns a full page
-   again (not empty), and `video_views` for that user has been cleared — confirms the
-   auto-reset actually fires.
-5. One user marking a video seen does not affect another user's feed (no cross-user leakage).
+1. `test_watched_video_is_moved_to_the_end_but_still_returned` — watching a newer video still
+   returns both videos (count unchanged), with the watched one pushed after the unwatched one
+   despite chronological order normally putting it first.
+2. `test_streaming_video_marks_it_seen_and_is_idempotent_across_range_requests` — repeated
+   `streamVideo()` calls (simulating range requests) produce only one `video_views` row.
+3. `test_search_ignores_seen_status_ordering` — `search` bypasses the reorder entirely; normal
+   chronological order is preserved even when one result has been seen.
+4. `test_seen_history_resets_once_all_active_videos_have_been_seen` — once every active video
+   is marked seen, the next fetch clears `video_views` for that user and the response already
+   reflects `is_seen_by_viewer: false` for everything.
+5. `test_seen_priority_is_scoped_per_user` — one user's watch history doesn't affect another
+   user's feed ordering or `is_seen_by_viewer` flags.
 
 ## Bonus fix (unrelated pre-existing bug, discovered while verifying)
 
 `Video::scopeFeedRanked()` used `LEAST()` unconditionally in its baseline-reach expression.
 `LEAST()` is a MySQL-only function and doesn't exist in SQLite (the project's local/dev
-database per `RUN.md`), so the entire default feed 500'd whenever running on SQLite — this
-was blocking verification of the feature above. Fixed by branching to SQLite's multi-arg
-`MIN()` for that expression, matching the existing driver-branch pattern already used two
-lines above it in the same method (`app/Models/Video.php`).
+database per `RUN.md`), so the entire default feed 500'd whenever running on SQLite. Fixed by
+branching to SQLite's multi-arg `MIN()` for that expression, matching the existing
+driver-branch pattern already used two lines above it in the same method (`app/Models/Video.php`).
 
 ## Verification performed
 
-- `php artisan test --filter=VideoControllerTest` — all new tests pass; all pre-existing tests
-  in this file pass except `feed_ranking_prioritizes_engagement_but_respects_chronology_mode`,
-  confirmed via `git stash` to already be broken on `main` for an unrelated reason (a ranking
-  weight/formula issue, not something touched by this change).
+- `php artisan test --filter=VideoControllerTest` — all tests for this feature pass; the one
+  pre-existing failure (`feed_ranking_prioritizes_engagement_but_respects_chronology_mode`) was
+  confirmed via `git stash` to already be broken on `main` for an unrelated ranking-weight
+  reason, not touched by this work.
 - `php artisan test` (full suite) — `AuthControllerTest`/`IpValidationTest` failures also
-  confirmed pre-existing on `main` via `git stash`, unrelated to this work.
+  confirmed pre-existing on `main` via `git stash`.
 - Manually drove the real flow against the running app (Docker + seeded `test@example.com`
-  user): fetched the feed, watched videos one by one via `GET /videos/{id}`, confirmed each
-  disappeared from subsequent feed calls, and confirmed the feed automatically repopulated
-  once all videos were watched.
+  user, 4 active videos): confirmed the feed always returns all 4 videos regardless of watch
+  state; confirmed a watched video moves to the back with `is_seen_by_viewer: true`; confirmed
+  that once all 4 were watched, the very next fetch auto-reset and returned all 4 with
+  `is_seen_by_viewer: false` again, in normal chronological order.
 
 ## Files touched
 
