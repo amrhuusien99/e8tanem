@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Like;
 use App\Models\Video;
+use App\Models\VideoView;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Storage;
@@ -129,6 +130,17 @@ class VideoController extends Controller
             });
         }
 
+        $userId = optional($request->user())->id;
+        $excludeSeen = $userId && !$search;
+
+        if ($excludeSeen) {
+            $query->whereNotIn('id', function ($sub) use ($userId) {
+                $sub->select('video_id')
+                    ->from('video_views')
+                    ->where('user_id', $userId);
+            });
+        }
+
         $perPage = max(1, min((int) $request->integer('per_page', 20), 100));
         $mode = strtolower($request->get('mode', 'feed'));
         $sortField = $request->get('sort');
@@ -152,6 +164,11 @@ class VideoController extends Controller
         }
 
         $videos = $query->paginate($perPage);
+
+        if ($excludeSeen && $videos->total() === 0 && Video::query()->where('is_active', true)->exists()) {
+            VideoView::query()->where('user_id', $userId)->delete();
+            $videos = $query->paginate($perPage);
+        }
 
         $collection = $videos->getCollection();
         $likedLookup = [];
@@ -230,7 +247,7 @@ class VideoController extends Controller
      *     )
      * )
      */
-    public function show(Video $video): JsonResponse
+    public function show(Video $video, Request $request): JsonResponse
     {
         if (!$video->is_active) {
             return response()->json(['message' => 'Video not found'], 404);
@@ -239,8 +256,19 @@ class VideoController extends Controller
         $video->load('user:id,name');
         $video->loadCount(['likes', 'comments']);
         $video->increment('views_count');
+        $this->markVideoAsSeen($request->user()->id, $video->id);
 
         return response()->json($video);
+    }
+
+    private function markVideoAsSeen(int $userId, int $videoId): void
+    {
+        VideoView::query()->insertOrIgnore([
+            'user_id' => $userId,
+            'video_id' => $videoId,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     /**
@@ -331,6 +359,8 @@ class VideoController extends Controller
         if (!file_exists($path)) {
             abort(404);
         }
+
+        $this->markVideoAsSeen(request()->user()->id, $video->id);
 
         $size = filesize($path);
         $start = 0;

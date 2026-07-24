@@ -6,7 +6,9 @@ use App\Models\Comment;
 use App\Models\Like;
 use App\Models\User;
 use App\Models\Video;
+use App\Models\VideoView;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class VideoControllerTest extends TestCase
@@ -144,5 +146,111 @@ class VideoControllerTest extends TestCase
             ->assertJsonPath('data.0.engagement_overview.likes', 1)
             ->assertJsonPath('data.0.engagement_overview.comments', 2)
             ->assertJsonPath('data.0.engagement_overview.views', 25);
+    }
+
+    public function test_watching_video_via_show_excludes_it_from_feed(): void
+    {
+        $seen = Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+        ]);
+
+        Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+        ]);
+
+        $this->actingAs($this->user)->getJson("/api/videos/{$seen->id}")->assertOk();
+
+        $response = $this->actingAs($this->user)->getJson('/api/videos');
+
+        $response->assertOk()->assertJsonCount(1, 'data');
+        $this->assertNotContains($seen->id, collect($response->json('data'))->pluck('id'));
+    }
+
+    public function test_streaming_video_marks_it_seen_and_is_idempotent_across_range_requests(): void
+    {
+        $path = 'videos/test-seen-' . uniqid() . '.mp4';
+        Storage::disk('public')->put($path, str_repeat('a', 2048));
+
+        $video = Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+            'video_url' => $path,
+        ]);
+
+        try {
+            $this->actingAs($this->user)->get("/api/videos/{$video->id}/stream")->assertOk();
+
+            $this->actingAs($this->user)
+                ->withHeaders(['Range' => 'bytes=0-100'])
+                ->get("/api/videos/{$video->id}/stream")
+                ->assertStatus(206);
+
+            $this->assertDatabaseCount('video_views', 1);
+            $this->assertDatabaseHas('video_views', [
+                'user_id' => $this->user->id,
+                'video_id' => $video->id,
+            ]);
+        } finally {
+            Storage::disk('public')->delete($path);
+        }
+    }
+
+    public function test_search_still_returns_already_seen_videos(): void
+    {
+        $video = Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+            'title' => 'UniqueSearchableTitle',
+        ]);
+
+        VideoView::factory()->create([
+            'user_id' => $this->user->id,
+            'video_id' => $video->id,
+        ]);
+
+        $response = $this->actingAs($this->user)->getJson('/api/videos?search=UniqueSearchableTitle');
+
+        $response->assertOk()->assertJsonCount(1, 'data');
+    }
+
+    public function test_feed_resets_after_all_active_videos_are_seen(): void
+    {
+        $videos = Video::factory()->count(2)->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+        ]);
+
+        foreach ($videos as $video) {
+            VideoView::factory()->create([
+                'user_id' => $this->user->id,
+                'video_id' => $video->id,
+            ]);
+        }
+
+        $response = $this->actingAs($this->user)->getJson('/api/videos');
+
+        $response->assertOk()->assertJsonCount(2, 'data');
+        $this->assertDatabaseCount('video_views', 0);
+    }
+
+    public function test_seen_video_exclusion_is_scoped_per_user(): void
+    {
+        $otherUser = User::factory()->create();
+
+        $video = Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+        ]);
+
+        VideoView::factory()->create([
+            'user_id' => $this->user->id,
+            'video_id' => $video->id,
+        ]);
+
+        $response = $this->actingAs($otherUser)->getJson('/api/videos');
+
+        $response->assertOk()->assertJsonCount(1, 'data');
     }
 }

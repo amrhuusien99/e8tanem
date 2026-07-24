@@ -86,12 +86,14 @@ class Video extends Model
                 $table
             );
             $viewsSafeExpr = 'MAX(COALESCE(views_count, 0), 1)';
+            $baselineExpr = '(MIN(COALESCE(views_count, 0), 5000) / 5000.0)';
         } else {
             $hoursSince = sprintf(
                 'GREATEST(TIMESTAMPDIFF(HOUR, %s.created_at, NOW()), 0)',
                 $table
             );
             $viewsSafeExpr = 'GREATEST(COALESCE(views_count, 0), 1)';
+            $baselineExpr = '(LEAST(COALESCE(views_count, 0), 5000) / 5000.0)';
         }
 
         $recencyExpr = "(1.0 / ({$hoursSince} + 1))";
@@ -99,7 +101,6 @@ class Video extends Model
             . '(COALESCE(likes_count, 0) * 1.5 + COALESCE(comments_count, 0) * 2)'
             . "/ {$viewsSafeExpr}"
             . ')';
-        $baselineExpr = '(LEAST(COALESCE(views_count, 0), 5000) / 5000.0)';
         $randomExpr = sprintf(
             '((((%1$d * %2$s.id) %% %3$d) + %3$d) %% %3$d) / %3$d.0',
             $multiplier,
