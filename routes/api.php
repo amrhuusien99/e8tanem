@@ -61,6 +61,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('/videos', [VideoController::class, 'index']);
     Route::get('/videos/{video}', [VideoController::class, 'show']);
     Route::get('/videos/{video}/stream', [VideoController::class, 'streamVideo']);
+    Route::post('/videos/{video}/view', [VideoController::class, 'markAsViewed']);
     Route::post('/videos/upload', [VideoController::class, 'store']);
 
     // Comments

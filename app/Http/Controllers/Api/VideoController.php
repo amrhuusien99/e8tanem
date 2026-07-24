@@ -278,6 +278,49 @@ class VideoController extends Controller
     }
 
     /**
+     * @OA\Post(
+     *     path="/api/videos/{id}/view",
+     *     summary="Mark a video as viewed by the current user",
+     *     description="Records that the authenticated user has watched this video, so it is deprioritized (moved after unseen videos) in their feed. Idempotent — safe to call more than once for the same video. Once every active video has been marked as viewed, the user's watch history resets automatically on their next feed request.",
+     *     tags={"Videos"},
+     *     security={{"bearerAuth": {}}},
+     *     @OA\Parameter(
+     *         name="id",
+     *         in="path",
+     *         required=true,
+     *         description="ID of the video",
+     *         @OA\Schema(type="integer")
+     *     ),
+     *     @OA\Response(
+     *         response=200,
+     *         description="View recorded",
+     *         @OA\JsonContent(
+     *             @OA\Property(property="seen", type="boolean", example=true)
+     *         )
+     *     ),
+     *     @OA\Response(
+     *         response=401,
+     *         description="Unauthenticated",
+     *         @OA\JsonContent(ref="#/components/schemas/UnauthorizedError")
+     *     ),
+     *     @OA\Response(
+     *         response=404,
+     *         description="Video not found"
+     *     )
+     * )
+     */
+    public function markAsViewed(Video $video, Request $request): JsonResponse
+    {
+        if (!$video->is_active) {
+            return response()->json(['message' => 'Video not found'], 404);
+        }
+
+        $this->markVideoAsSeen($request->user()->id, $video->id);
+
+        return response()->json(['seen' => true]);
+    }
+
+    /**
      * @OA\Get(
      *     path="/api/videos/{id}/stream",
      *     summary="Stream video content",

@@ -288,4 +288,60 @@ class VideoControllerTest extends TestCase
         );
         $this->assertFalse(collect($response->json('data'))->firstWhere('id', $newer->id)['is_seen_by_viewer']);
     }
+
+    public function test_marking_video_as_viewed_records_it_as_seen(): void
+    {
+        $unseen = Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+            'created_at' => now()->subHour(),
+        ]);
+
+        $viewed = Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+            'created_at' => now(),
+        ]);
+
+        $response = $this->actingAs($this->user)->postJson("/api/videos/{$viewed->id}/view");
+
+        $response->assertOk()->assertJson(['seen' => true]);
+        $this->assertDatabaseHas('video_views', [
+            'user_id' => $this->user->id,
+            'video_id' => $viewed->id,
+        ]);
+
+        $feed = $this->actingAs($this->user)->getJson('/api/videos?mode=chronological');
+
+        $feed->assertOk();
+        $this->assertEquals(
+            [$unseen->id, $viewed->id],
+            collect($feed->json('data'))->pluck('id')->all()
+        );
+    }
+
+    public function test_marking_video_as_viewed_is_idempotent(): void
+    {
+        $video = Video::factory()->create([
+            'is_active' => true,
+            'user_id' => $this->user->id,
+        ]);
+
+        $this->actingAs($this->user)->postJson("/api/videos/{$video->id}/view")->assertOk();
+        $this->actingAs($this->user)->postJson("/api/videos/{$video->id}/view")->assertOk();
+
+        $this->assertDatabaseCount('video_views', 1);
+    }
+
+    public function test_cannot_mark_inactive_video_as_viewed(): void
+    {
+        $video = Video::factory()->create([
+            'is_active' => false,
+            'user_id' => $this->user->id,
+        ]);
+
+        $response = $this->actingAs($this->user)->postJson("/api/videos/{$video->id}/view");
+
+        $response->assertNotFound();
+    }
 }

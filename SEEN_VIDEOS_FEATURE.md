@@ -75,6 +75,53 @@ Called in:
 - `VideoController::streamVideo()` — right after the `is_active`/file-exists checks. Since
   range requests call this method repeatedly per playback, `insertOrIgnore` keeps this a cheap
   no-op after the first hit.
+- `VideoController::markAsViewed()` — new dedicated endpoint, see below.
+
+### Why a dedicated `POST /videos/{id}/view` endpoint was added
+
+Production testing against `e8tanem.xyz` (real account, real data) proved the reorder/reset
+logic in `index()` itself works correctly — a watched video reliably moved to the back of the
+feed and the history reset once everything had been seen. But the *reported* symptom (same
+videos, same order, every app launch) persisted in the actual mobile app. Root cause: the
+Flutter client plays a video directly from the `video_url` already present in the feed
+response — it never calls `show()` or `streamVideo()` during normal feed scrolling/autoplay, so
+`markVideoAsSeen()` was never actually triggered from real usage. Nothing ever transitioned
+out of "unseen," so the feed kept falling back to `feedRanked()`'s deterministic per-user seed
+— the original bug, undisturbed.
+
+The client-side fix (Flutter): call a "mark as viewed" request from `_onVisibilityChanged`
+(not `_initializeVideo`, which fires even for cards the user swipes straight past) once a
+video has been at least ~70% visible for a couple of seconds, guarded by an in-memory
+`Set<int>` in the cubit (same pattern as `_likesInFlight`) to avoid re-sending for a card
+already handled in the current session.
+
+Server-side, this needed a real endpoint for that client call to hit:
+
+```php
+public function markAsViewed(Video $video, Request $request): JsonResponse
+{
+    if (!$video->is_active) {
+        return response()->json(['message' => 'Video not found'], 404);
+    }
+
+    $this->markVideoAsSeen($request->user()->id, $video->id);
+
+    return response()->json(['seen' => true]);
+}
+```
+
+Route (`routes/api.php`, inside the `auth:sanctum` group, next to `streamVideo`):
+
+```php
+Route::post('/videos/{video}/view', [VideoController::class, 'markAsViewed']);
+```
+
+Response: `{"seen": true}` (mirrors the existing `{"liked": true}` shape from
+`LikeController::toggle()`). Idempotent via the same `insertOrIgnore` path used by `show()`/
+`streamVideo()` — the `video_views` unique constraint (`user_id`, `video_id`) is itself the
+permanent server-side dedupe, so no separate time-window logic is needed; the client's
+in-memory `Set` only avoids redundant requests within a session, it isn't relied on for
+correctness.
 
 ## Reordering the feed in `index()` (current, final behavior)
 
@@ -141,6 +188,12 @@ factories, `actingAs`, `getJson`):
    reflects `is_seen_by_viewer: false` for everything.
 5. `test_seen_priority_is_scoped_per_user` — one user's watch history doesn't affect another
    user's feed ordering or `is_seen_by_viewer` flags.
+6. `test_marking_video_as_viewed_records_it_as_seen` — `POST /videos/{id}/view` writes a
+   `video_views` row and the very next feed fetch reflects the reorder.
+7. `test_marking_video_as_viewed_is_idempotent` — calling it twice for the same video still
+   leaves exactly one `video_views` row.
+8. `test_cannot_mark_inactive_video_as_viewed` — returns 404 for an inactive video, matching
+   `show()`'s behavior.
 
 ## Bonus fix (unrelated pre-existing bug, discovered while verifying)
 
@@ -175,3 +228,11 @@ driver-branch pattern already used two lines above it in the same method (`app/M
 - `app/Http/Controllers/Api/VideoController.php`
 - `app/Models/Video.php` (bonus `LEAST`/`MIN` fix)
 - `tests/Feature/Api/VideoControllerTest.php`
+- `routes/api.php` (new `POST /videos/{video}/view` route)
+
+## Deployment note
+
+This latest change (the `markAsViewed` endpoint + route) is **not yet on `e8tanem.xyz`** — it
+only exists in the local working tree at the time of writing. The Flutter app change (calling
+this endpoint from `_onVisibilityChanged`) and this backend endpoint need to ship together;
+the backend change alone doesn't fix the reported symptom without the client wiring it up.
